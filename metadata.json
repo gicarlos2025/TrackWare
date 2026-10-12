@@ -1,0 +1,6 @@
+{
+  "name": "WareTrack - Gestão Logística",
+  "description": "Sistema integrado de gestão logística e rastreamento de estoque em tempo real com gêmeo digital 3D interativo de armazéns e frotas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
