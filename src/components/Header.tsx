@@ -17,6 +17,7 @@ import {
   Search,
   Eye,
   Zap,
+  Scale,
 } from 'lucide-react';
 import { WarehouseId, WarehouseConfig, ViewTab } from '../types/warehouse';
 import { soundManager } from '../utils/audio';
@@ -35,6 +36,7 @@ interface HeaderProps {
   onSetSimSpeed?: (speed: number) => void;
   onOpenNewDispatch?: () => void;
   onOpenRoutineMonitor?: () => void;
+  onOpenRegulatory?: () => void;
   onSearchQuery?: (q: string) => void;
 }
 
@@ -52,6 +54,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSetSimSpeed,
   onOpenNewDispatch,
   onOpenRoutineMonitor,
+  onOpenRegulatory,
 }) => {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [searchValue, setSearchValue] = useState('');
@@ -289,6 +292,21 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Zap className="w-3.5 h-3.5 text-sky-400" />
                 <span className="hidden sm:inline">Rotina dos Momentos</span>
+              </button>
+            )}
+
+            {/* CTB & Regulatory Norms (NRs) Button */}
+            {onOpenRegulatory && (
+              <button
+                onClick={() => {
+                  soundManager.playClick();
+                  onOpenRegulatory();
+                }}
+                className="flex items-center gap-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 hover:border-emerald-500/50 font-bold h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs transition-all cursor-pointer shadow-sm"
+                title="Regulamentação CTB (Código de Trânsito) e Normas NR-11/12/26"
+              >
+                <Scale className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">Normas CTB & NRs</span>
               </button>
             )}
 

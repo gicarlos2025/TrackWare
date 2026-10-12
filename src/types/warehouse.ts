@@ -55,6 +55,47 @@ export interface Vehicle {
   routineStepName?: string;
   routineStepDesc?: string;
   routineParameters?: string;
+  compliance?: VehicleSafetyCompliance;
+}
+
+export interface VehicleSafetyCompliance {
+  ctbCompliant: boolean;
+  speedLimitKmh: number; // 15 km/h pátio, 8 km/h galpão
+  pedestrianPriorityRespected: boolean;
+  nr11ChecklistValid: boolean;
+  nr11OperatorBadge: {
+    operatorName: string;
+    operatorRole: string;
+    cnhNumber: string;
+    cnhCategory: string;
+    nr11CourseValidUntil: string;
+    trainingHours: number;
+    badgeStatus: 'Válido' | 'Expirado' | 'Em Renovação';
+  };
+  dailyChecklist12Items: {
+    item: string;
+    status: 'Conforme' | 'Não Conforme';
+    inspectedAt: string;
+  }[];
+  nr12SafetyProtection: {
+    ropsFopsCabin: boolean;
+    emergencyStopButton: boolean;
+    presenceSensorActive: boolean;
+  };
+  dockProtocol: {
+    wheelChocksEngaged: boolean;
+    ignitionKeyRetainedInOffice: boolean;
+    dockSafetyTrafficLight: 'Vermelho (Bloqueado)' | 'Verde (Liberado)';
+    dockMarshallAssigned: boolean;
+    safetySealNumber?: string;
+  };
+  ppeAudit: {
+    reflectiveVest: boolean;
+    safetyHelmet: boolean;
+    steelToeBoots: boolean;
+    earProtection: boolean;
+    noCellphoneRuleCompliant: boolean;
+  };
 }
 
 export interface RoutineMomentDefinition {

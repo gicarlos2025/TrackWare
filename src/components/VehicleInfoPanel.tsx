@@ -26,6 +26,7 @@ interface VehicleInfoPanelProps {
   onAccelerateOperation: (vehicleId: string) => void;
   onReleaseDock: (vehicleId: string) => void;
   onOpenRoutineMonitor?: () => void;
+  onOpenRegulatory?: () => void;
 }
 
 export const VehicleInfoPanel: React.FC<VehicleInfoPanelProps> = ({
@@ -35,6 +36,7 @@ export const VehicleInfoPanel: React.FC<VehicleInfoPanelProps> = ({
   onAccelerateOperation,
   onReleaseDock,
   onOpenRoutineMonitor,
+  onOpenRegulatory,
 }) => {
   if (!vehicle) return null;
 
@@ -290,6 +292,77 @@ export const VehicleInfoPanel: React.FC<VehicleInfoPanelProps> = ({
             className="w-full mt-1 py-1.5 px-2.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 text-[11px] font-semibold flex items-center justify-center gap-1.5 border border-sky-500/20 transition-all cursor-pointer"
           >
             <span>Ver Matriz dos 11 Momentos</span>
+          </button>
+        )}
+      </div>
+
+      {/* Cartão de Conformidade Regulatória (CTB & NRs) */}
+      <div className="mb-4 bg-slate-900/95 border border-emerald-500/30 rounded-xl p-3 shadow-md">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-1.5">
+            <div className="w-6 h-6 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+              <ShieldCheck className="w-3.5 h-3.5" />
+            </div>
+            <span className="text-xs font-bold text-white font-mono">
+              Conformidade CTB & NRs
+            </span>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
+            100% Conforme
+          </span>
+        </div>
+
+        <div className="space-y-1.5 text-[11px] text-slate-300">
+          <div className="flex justify-between items-center py-1 border-b border-slate-800">
+            <span className="text-slate-400">Crachá / Habilitação:</span>
+            <span className="font-mono text-emerald-400 font-semibold">NR-11 Válido (16h)</span>
+          </div>
+
+          <div className="flex justify-between items-center py-1 border-b border-slate-800">
+            <span className="text-slate-400">Checklist Pré-Operacional:</span>
+            <span className="font-mono text-emerald-400 font-semibold">Aprovado (Diário)</span>
+          </div>
+
+          <div className="flex justify-between items-center py-1 border-b border-slate-800">
+            <span className="text-slate-400">Limite de Velocidade:</span>
+            <span className="font-mono text-sky-300 font-bold">
+              {isTruck ? '15 km/h (Pátio)' : '7 km/h (Galpão)'}
+            </span>
+          </div>
+
+          <div className="flex justify-between items-center py-1 border-b border-slate-800">
+            <span className="text-slate-400">Calços de Segurança:</span>
+            <span className="font-mono text-slate-200">
+              {['Acoplado', 'A descarregar', 'A carregar'].includes(vehicle.status)
+                ? 'Travados nas Rodas (NR-11)'
+                : 'Liberados para Trânsito'}
+            </span>
+          </div>
+
+          <div className="flex justify-between items-center py-1 border-b border-slate-800">
+            <span className="text-slate-400">Chave do Veículo:</span>
+            <span className="font-mono text-slate-200">
+              {['Acoplado', 'A descarregar', 'A carregar'].includes(vehicle.status)
+                ? 'Retida no Lacre / Doca'
+                : 'Com o Condutor'}
+            </span>
+          </div>
+
+          <div className="flex justify-between items-center py-1">
+            <span className="text-slate-400">Uso de Celular / Fones:</span>
+            <span className="font-mono text-emerald-400 font-bold">Proibido (Tolerância Zero)</span>
+          </div>
+        </div>
+
+        {onOpenRegulatory && (
+          <button
+            onClick={() => {
+              soundManager.playClick();
+              onOpenRegulatory();
+            }}
+            className="w-full mt-2.5 py-1.5 px-2.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-[11px] font-semibold flex items-center justify-center gap-1.5 border border-emerald-500/20 transition-all cursor-pointer"
+          >
+            <span>Ver Diretrizes Legais & NRs</span>
           </button>
         )}
       </div>

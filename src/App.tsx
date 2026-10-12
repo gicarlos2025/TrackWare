@@ -35,6 +35,7 @@ import { MobileBottomNav } from './components/MobileBottomNav';
 import { NewDispatchModal } from './components/NewDispatchModal';
 import { NewSKUModal } from './components/NewSKUModal';
 import { RoutineMonitorModal } from './components/RoutineMonitorModal';
+import { RegulatoryComplianceModal } from './components/RegulatoryComplianceModal';
 
 export default function App() {
   // Warehouse Selection State
@@ -61,6 +62,7 @@ export default function App() {
   const [isNewDispatchOpen, setIsNewDispatchOpen] = useState(false);
   const [isNewSKUOpen, setIsNewSKUOpen] = useState(false);
   const [isRoutineMonitorOpen, setIsRoutineMonitorOpen] = useState(false);
+  const [isRegulatoryModalOpen, setIsRegulatoryModalOpen] = useState(false);
 
   // Helper to append live activities
   const logActivity = (
@@ -406,6 +408,7 @@ export default function App() {
         onSetSimSpeed={setSimSpeed}
         onOpenNewDispatch={() => setIsNewDispatchOpen(true)}
         onOpenRoutineMonitor={() => setIsRoutineMonitorOpen(true)}
+        onOpenRegulatory={() => setIsRegulatoryModalOpen(true)}
       />
 
       {/* 2. Main Content Area */}
@@ -429,6 +432,7 @@ export default function App() {
             onVehicleStatusChange={handleVehicleStatusChange}
             onActivityLog={logActivity}
             onDockUpdate={handleDockUpdate}
+            onOpenRegulatory={() => setIsRegulatoryModalOpen(true)}
           />
 
           {/* Camera controls toolbar overlay */}
@@ -445,6 +449,7 @@ export default function App() {
             onAccelerateOperation={handleAccelerateOperation}
             onReleaseDock={handleReleaseDock}
             onOpenRoutineMonitor={() => setIsRoutineMonitorOpen(true)}
+            onOpenRegulatory={() => setIsRegulatoryModalOpen(true)}
           />
         </div>
 
@@ -533,6 +538,12 @@ export default function App() {
         onAccelerateAll={handleAccelerateAll}
         simSpeed={simSpeed}
         onSetSimSpeed={setSimSpeed}
+      />
+
+      <RegulatoryComplianceModal
+        isOpen={isRegulatoryModalOpen}
+        onClose={() => setIsRegulatoryModalOpen(false)}
+        vehicles={vehicles}
       />
     </div>
   );

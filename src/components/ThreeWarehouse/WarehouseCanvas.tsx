@@ -10,7 +10,7 @@ import {
 } from './models';
 import { soundManager } from '../../utils/audio';
 import { TrafficManager } from '../../utils/trafficManager';
-import { ShieldAlert, Radio, Truck, RefreshCw } from 'lucide-react';
+import { ShieldAlert, Radio, Truck, RefreshCw, Scale, ShieldCheck, CheckCircle2 } from 'lucide-react';
 
 interface WarehouseCanvasProps {
   vehicles: Vehicle[];
@@ -30,6 +30,7 @@ interface WarehouseCanvasProps {
   ) => void;
   onActivityLog?: (title: string, description: string, type: 'truck' | 'forklift' | 'agv' | 'dock', severity?: 'info' | 'success' | 'warning') => void;
   onDockUpdate?: (dockId: number, status: 'Disponível' | 'Em Carga' | 'Em Descarga', progress: number, truckId?: string) => void;
+  onOpenRegulatory?: () => void;
 }
 
 type TruckOperation = 'UNLOAD' | 'LOAD';
@@ -66,7 +67,8 @@ interface TruckMissionState {
   randomEventTriggered: boolean;
   totalPallets: number;
   entryGateSide: 'east' | 'west';
-  // Anti-colisão 3D: Desvio de Rota & Lógica de Espera
+  // Anti-colisão 3D: Navegação Estruturada por Corredores & Lógica de Espera
+  approachPhase?: 'ENTRY_GATE' | 'YARD_CORRIDOR' | 'DOCK_APRON';
   detourActive?: boolean;
   detourTarget?: { x: number; z: number };
   detourDirection?: 'left' | 'right';
@@ -125,6 +127,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
   onVehicleStatusChange,
   onActivityLog,
   onDockUpdate,
+  onOpenRegulatory,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -340,18 +343,18 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
         });
 
         // =========================================================================
-        // Helper: Detecção Física de Sobreposição / Colisão Entre Caminhões
-        // Modela cada caminhão com 4 discos ao longo da carroceria (10.5m x 2.65m)
-        // Raio: 1.45m em cada ponto -> envelope físico contínuo sem frestas
+        // Helper: Detecção Física de Sobreposição / Anticolisão Entre Caminhões
+        // Modela cada caminhão com 4 discos calibrados ao longo da carroceria (10.1m x 2.5m)
+        // Raio: 1.30m em cada ponto -> envelope físico fiel e preciso sem bolhas fantasmas
         // =========================================================================
         const getTruckDiscs = (x: number, z: number, rotY: number) => {
           const sin = Math.sin(rotY);
           const cos = Math.cos(rotY);
           return [
-            { x: x + 3.75 * sin, z: z + 3.75 * cos, r: 1.45 }, // Cabine frontal e para-choque
-            { x: x + 1.25 * sin, z: z + 1.25 * cos, r: 1.45 }, // Chassi dianteiro
-            { x: x - 1.25 * sin, z: z - 1.25 * cos, r: 1.45 }, // Centro do baú
-            { x: x - 3.75 * sin, z: z - 3.75 * cos, r: 1.45 }, // Traseira do baú e portas
+            { x: x + 3.4 * sin, z: z + 3.4 * cos, r: 1.30 }, // Cabine frontal e para-choque
+            { x: x + 1.1 * sin, z: z + 1.1 * cos, r: 1.30 }, // Chassi dianteiro
+            { x: x - 1.1 * sin, z: z - 1.1 * cos, r: 1.30 }, // Centro do baú
+            { x: x - 3.4 * sin, z: z - 3.4 * cos, r: 1.30 }, // Traseira do baú e portas
           ];
         };
 
@@ -387,7 +390,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
           candX: number,
           candZ: number,
           candRotY: number,
-          safetyBuffer = 0.85
+          safetyBuffer = 0.40
         ): {
           collides: boolean;
           hazard: boolean;
@@ -400,6 +403,11 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
           let closestId: string | null = null;
           let closestPos: { x: number; z: number } | undefined = undefined;
 
+          const selfTruck = truckMeshesRef.current.get(selfId);
+          const isSelfDeparting =
+            selfTruck &&
+            (selfTruck.state.stage === 'DEPARTING' || selfTruck.state.stage === 'EXITING_CD');
+
           for (const other of activeTruckSnapshots) {
             if (other.id === selfId) continue;
             // Distância euclidiana rápida entre os centros de massa
@@ -407,6 +415,22 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
             const dz = other.z - candZ;
             const centerDist = Math.hypot(dx, dz);
             if (centerDist > 16.0) continue; // Totalmente seguro, fora da zona crítica
+
+            // Se o outro veículo estiver atracado na doca (z < 6.0) e não estivermos manobrando na mesma doca
+            if (other.z < 6.0 && candZ > 12.0) continue;
+
+            const otherTruck = truckMeshesRef.current.get(other.id);
+            const isOtherYielding =
+              otherTruck &&
+              otherTruck.state.avoidanceState === 'waiting' &&
+              (otherTruck.state.stage === 'APPROACH' ||
+                otherTruck.state.stage === 'WAITING_YARD' ||
+                otherTruck.state.stage === 'GATE_IN');
+
+            // Regra de Ouro CTB Art. 29: Veículo desocupando doca tem preferência sobre veículo aguardando
+            if (isSelfDeparting && isOtherYielding && centerDist > 3.3) {
+              continue; // Passagem autorizada com prioridade regulamentar
+            }
 
             const otherDiscs = getTruckDiscs(other.x, other.z, other.rotY);
             for (const d1 of myDiscs) {
@@ -419,7 +443,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                   closestId = other.id;
                   closestPos = { x: other.x, z: other.z };
                 }
-                // Verificação física estrita: soma dos raios + margem de segurança
+                // Verificação física calibrada
                 const threshold = d1.r + d2.r + safetyBuffer;
                 if (dist < threshold) {
                   return {
@@ -436,7 +460,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
 
           return {
             collides: false,
-            hazard: closestDist < 4.8,
+            hazard: closestDist < 4.0,
             obstacleId: closestId,
             minDist: closestDist,
             obstaclePos: closestPos,
@@ -522,6 +546,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
         // =========================================================================
         // YMS TRAFFIC CONTROLLER: RESOLUÇÃO ATIVA DE CONGESTIONAMENTO / DEADLOCK
         // Se dois veículos estiverem em espera mútua ou com caminho bloqueado em frente à doca
+        // Aplicação do Art. 29 CTB: Preferência absoluta para quem desocupa a doca
         // =========================================================================
         truckMeshesRef.current.forEach((t1) => {
           if (!t1.mesh.visible || t1.state.avoidanceState !== 'waiting') return;
@@ -533,19 +558,37 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
               const isT2Departing = t2.state.stage === 'DEPARTING' || t2.state.stage === 'EXITING_CD';
 
               if (isT2Departing && !isT1Departing) {
-                // T1 está aproximando ou esperando: recuar para a linha de espera segura (z = 17.5) para liberar T2
-                if (t1.mesh.position.z < 17.5) {
-                  t1.mesh.position.z += 0.08 * currentSimSpeed;
+                // T1 está aproximando ou esperando: recuar para a linha de espera segura (z = 18.5) para liberar T2
+                if (t1.mesh.position.z < 18.5) {
+                  t1.mesh.position.z += 0.12 * currentSimSpeed;
                 }
-                t1.data.status = 'Cedendo Passagem';
-                t1.data.loc = `Pátio Central · Cedendo via para saída de ${t2.data.id}`;
+                // Se estiver exatamente na linha frontal da doca de T2, deslocar lateralmente para dar passagem
+                if (Math.abs(t1.mesh.position.x - t2.mesh.position.x) < 4.0) {
+                  const shiftDir = t2.mesh.position.x >= 0 ? -1 : 1;
+                  t1.mesh.position.x += shiftDir * 0.08 * currentSimSpeed;
+                }
+                t1.data.status = 'Cedendo Passagem (CTB Art. 29)';
+                t1.data.loc = `Pátio Central · Cedendo via com preferência para saída de ${t2.data.id}`;
+                // Desbloqueia T2 para retomar movimento imediatamente
+                if (t2.state.avoidanceState === 'waiting' && t2.state.blockedByVehicleId === t1.data.id) {
+                  t2.state.avoidanceState = 'clear';
+                  t2.state.blockedByVehicleId = null;
+                }
               } else if (isT1Departing && !isT2Departing) {
                 // T1 está partindo: T2 deve dar passagem
-                if (t2.mesh.position.z < 17.5) {
-                  t2.mesh.position.z += 0.08 * currentSimSpeed;
+                if (t2.mesh.position.z < 18.5) {
+                  t2.mesh.position.z += 0.12 * currentSimSpeed;
                 }
-                t2.data.status = 'Cedendo Passagem';
-                t2.data.loc = `Pátio Central · Cedendo via para saída de ${t1.data.id}`;
+                if (Math.abs(t2.mesh.position.x - t1.mesh.position.x) < 4.0) {
+                  const shiftDir = t1.mesh.position.x >= 0 ? -1 : 1;
+                  t2.mesh.position.x += shiftDir * 0.08 * currentSimSpeed;
+                }
+                t2.data.status = 'Cedendo Passagem (CTB Art. 29)';
+                t2.data.loc = `Pátio Central · Cedendo via com preferência para saída de ${t1.data.id}`;
+                if (t1.state.avoidanceState === 'waiting' && t1.state.blockedByVehicleId === t2.data.id) {
+                  t1.state.avoidanceState = 'clear';
+                  t1.state.blockedByVehicleId = null;
+                }
               }
             }
           }
@@ -577,7 +620,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                   t.data.id !== data.id &&
                   t.state.stage !== 'STANDBY_HIGHWAY' &&
                   t.state.stage !== 'MISSION_COMPLETED' &&
-                  !(t.state.stage === 'EXITING_CD' && t.mesh.position.z >= 22.0)
+                  !(t.state.stage === 'EXITING_CD' && t.mesh.position.z >= 24.0)
                 ) {
                   busyDockIds.add(t.state.dockId);
                 }
@@ -776,10 +819,50 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
               data.loc = 'Portaria de Entrada (Vistoria de Lacre & Termografia)';
 
               if (state.dwellTimer <= 0) {
+                // Verificar se a doca designada já está liberada antes de abrir a cancela
+                let targetDockBusy = false;
+                let busyVehicleId: string | null = null;
+                truckMeshesRef.current.forEach((other) => {
+                  if (
+                    other.data.id !== data.id &&
+                    other.mesh.visible &&
+                    other.state.stage !== 'STANDBY_HIGHWAY' &&
+                    other.state.stage !== 'MISSION_COMPLETED'
+                  ) {
+                    if (
+                      other.state.dockId === state.dockId &&
+                      !(other.state.stage === 'EXITING_CD' && other.mesh.position.z >= 22.0)
+                    ) {
+                      targetDockBusy = true;
+                      busyVehicleId = other.data.id;
+                    }
+                    // Se algum caminhão estiver partindo pelo pátio na frente das docas, esperar na portaria
+                    if (
+                      (other.state.stage === 'DEPARTING' ||
+                        (other.state.stage === 'EXITING_CD' && other.mesh.position.z < 21.0)) &&
+                      Math.abs(other.mesh.position.x - 0) < 12.0
+                    ) {
+                      targetDockBusy = true;
+                      busyVehicleId = other.data.id;
+                    }
+                  }
+                });
+
+                if (targetDockBusy) {
+                  data.speedKmh = 0;
+                  state.avoidanceState = 'waiting';
+                  state.blockedByVehicleId = busyVehicleId;
+                  data.status = 'Aguardando Doca Livre';
+                  data.loc = `Portaria de Entrada · Aguardando desocupação da Doca 0${state.dockId} por ${busyVehicleId || 'veículo'} (CTB Art. 29)`;
+                  data.routineStepDesc = `Aguardando saída e liberação da doca por veículo prioritário`;
+                  return;
+                }
+
                 // Verificar se a área do pátio para entrar está desobstruída
-                const col = checkTruckCollision(data.id, 0, 16.5, 0, 0.90);
+                const col = checkTruckCollision(data.id, 0, 17.5, Math.PI, 0.40);
                 if (!col.collides) {
                   state.stage = 'APPROACH';
+                  state.approachPhase = 'ENTRY_GATE';
                   activityLogCallbackRef.current?.(
                     'Rotina · Acesso Autorizado',
                     `${data.id}: Momento 2 concluído. Lacre e balança validados. Entrada no pátio autorizada rumo à Doca 0${state.dockId}.`,
@@ -798,230 +881,214 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
             }
           }
 
-          // MOMENTO 3 · Aproximação & Pátio (Trânsito ágil pelo pátio central com Desvio de Rota & Espera)
+          // MOMENTO 3 · Aproximação & Pátio (Trânsito Estruturado por Corredores & Respeito Estrito à Desocupação)
           else if (state.stage === 'APPROACH') {
             data.routineStep = 3;
             data.routineStepName = 'Momento 3 · Aproximação & Pátio';
-            data.routineStepDesc = `Deslocamento pelo pátio central em direção à Doca 0${state.dockId}`;
-            data.routineParameters = 'Velocidade no Pátio: 32 km/h | Radar Anticolisão Ativo | Desvio Dinâmico';
+            data.routineStepDesc = `Deslocamento pelo corredor de entrada em direção à Doca 0${state.dockId}`;
+            data.routineParameters = 'Velocidade no Pátio: 14 km/h | Radar Anticolisão Ativo | Vias Estruturadas';
 
-            // Verificar se outro caminhão já está atracado ou manobrando na mesma doca
-            let dockOccupied = false;
-            truckMeshesRef.current.forEach((other) => {
-              if (
-                other.data.id !== data.id &&
-                other.state.dockId === state.dockId &&
-                other.state.stage !== 'STANDBY_HIGHWAY' &&
-                other.state.stage !== 'MISSION_COMPLETED' &&
-                !(other.state.stage === 'EXITING_CD' && other.mesh.position.z >= 22.0)
-              ) {
-                dockOccupied = true;
-              }
-              // Se houver qualquer caminhão ativamente partindo ou manobrando em frente a esta doca (área de apron)
-              if (
-                other.data.id !== data.id &&
-                other.mesh.visible &&
-                (other.state.stage === 'DEPARTING' ||
-                  other.state.stage === 'ALIGN_REVERSE' ||
-                  other.state.stage === 'REVERSING') &&
-                Math.abs(other.mesh.position.x - state.dockX) < 7.5 &&
-                other.mesh.position.z < 16.5
-              ) {
-                dockOccupied = true;
-              }
-            });
-
-            if (dockOccupied) {
-              state.detourActive = false;
-              state.stage = 'WAITING_YARD';
-              data.status = 'Aguardando Doca Livre';
-              data.loc = `Pátio de Espera (Aguardando liberação da Doca 0${state.dockId})`;
-              return;
+            if (!state.approachPhase) {
+              state.approachPhase = mesh.position.z > 18.0 ? 'ENTRY_GATE' : 'YARD_CORRIDOR';
             }
 
-            const primaryGoalX = state.dockX;
-            const primaryGoalZ = 14.0;
-
-            // Se um desvio de rota evasivo estiver em andamento:
-            if (state.detourActive && state.detourTarget) {
-              state.detourTimer = (state.detourTimer ?? 4.0) - 0.045 * currentSimSpeed;
-              const dtx = state.detourTarget.x - mesh.position.x;
-              const dtz = state.detourTarget.z - mesh.position.z;
-              const detourDist = Math.hypot(dtx, dtz);
-
-              // Concluir o desvio caso o waypoint tenha sido alcançado ou tempo expirado
-              if (detourDist < 0.65 || state.detourTimer <= 0) {
-                const checkDirect = checkTruckCollision(
-                  data.id,
-                  mesh.position.x,
-                  mesh.position.z,
-                  Math.atan2(primaryGoalX - mesh.position.x, primaryGoalZ - mesh.position.z),
-                  0.90
-                );
-                if (!checkDirect.collides) {
-                  state.detourActive = false;
-                  state.detourTarget = undefined;
-                  state.avoidanceState = 'clear';
-                  state.blockedByVehicleId = null;
-                }
-              } else {
-                // Navegação guiada pelo waypoint de desvio de rota
-                const detourAngle = Math.atan2(dtx, dtz);
-                let diff = detourAngle - mesh.rotation.y;
-                while (diff < -Math.PI) diff += Math.PI * 2;
-                while (diff > Math.PI) diff -= Math.PI * 2;
-                const maxTurn = 0.065 * currentSimSpeed;
-                const nextRotY = mesh.rotation.y + THREE.MathUtils.clamp(diff, -maxTurn, maxTurn);
-
-                const step = Math.min(detourDist, 0.135 * currentSimSpeed);
-                const nextX = mesh.position.x + (dtx / detourDist) * step;
-                const nextZ = mesh.position.z + (dtz / detourDist) * step;
-
-                const stepCol = checkTruckCollision(data.id, nextX, nextZ, nextRotY, 0.85);
-                if (!stepCol.collides) {
-                  mesh.rotation.y = nextRotY;
-                  mesh.position.x = nextX;
-                  mesh.position.z = nextZ;
-                  data.speedKmh = 22;
-                  data.status = 'Desvio de Rota';
-                  state.avoidanceState = 'detouring';
-                  data.loc = `Pátio Central · Desvio Lateral Anticolisão (${state.detourDirection === 'right' ? 'Direita' : 'Esquerda'})`;
-                  data.routineStepDesc = `Executando desvio de rota planejado (${state.detourDirection === 'right' ? 'à direita' : 'à esquerda'})`;
-                  data.routineParameters = 'Radar LiDAR 360° | Desvio Dinâmico de Rota | 22 km/h';
-                  return;
-                } else {
-                  // Se o próprio desvio encontrar bloqueio: LÓGICA DE ESPERA
-                  data.speedKmh = 0;
-                  state.avoidanceState = 'waiting';
-                  state.blockedByVehicleId = stepCol.obstacleId;
-                  data.status = 'Aguardando Desvio';
-                  data.loc = `Pátio Central · Parada no Desvio (Cedendo passagem a ${stepCol.obstacleId})`;
-                  data.routineParameters = 'Parada Preventiva | Distância de Segurança Garantida';
-                  return;
-                }
-              }
-            }
-
-            // Movimento normal rumo à doca
-            const dx = primaryGoalX - mesh.position.x;
-            const dz = primaryGoalZ - mesh.position.z;
-            const dist = Math.sqrt(dx * dx + dz * dz);
-
-            if (dist > 0.35) {
-              const targetAngle = Math.atan2(dx, dz);
+            // FASE 1: Transição do Portão (z = 19.0) para a Faixa de Entrada Norte (z = 17.5)
+            if (state.approachPhase === 'ENTRY_GATE') {
+              const targetZ = 17.5;
+              const targetAngle = Math.PI; // Rumo sul (entrando no pátio)
               let diff = targetAngle - mesh.rotation.y;
               while (diff < -Math.PI) diff += Math.PI * 2;
               while (diff > Math.PI) diff -= Math.PI * 2;
-              const maxTurn = 0.055 * currentSimSpeed;
-              const nextRotY = mesh.rotation.y + THREE.MathUtils.clamp(diff, -maxTurn, maxTurn);
+              mesh.rotation.y += THREE.MathUtils.clamp(diff, -0.065 * currentSimSpeed, 0.065 * currentSimSpeed);
 
-              const step = Math.min(dist, 0.145 * currentSimSpeed);
-              const nextX = mesh.position.x + (dx / dist) * step;
-              const nextZ = mesh.position.z + (dz / dist) * step;
+              const forwardSpeed = 0.135 * currentSimSpeed;
+              const nextZ = Math.max(targetZ, mesh.position.z - forwardSpeed);
+              const col = checkTruckCollision(data.id, mesh.position.x, nextZ, mesh.rotation.y, 0.40);
 
-              // Verificação física estrita de colisão antes do movimento
-              const col = checkTruckCollision(data.id, nextX, nextZ, nextRotY, 0.90);
-              if (col.collides) {
-                // COLISÃO PRESTES A OCORRER: Avaliar Desvio de Rota
-                const detourPlan = evaluateRouteDetour(
-                  data.id,
-                  mesh.position.x,
-                  mesh.position.z,
-                  mesh.rotation.y,
-                  primaryGoalX,
-                  primaryGoalZ
-                );
+              if (!col.collides) {
+                mesh.position.z = nextZ;
+                mesh.position.x += (0 - mesh.position.x) * 0.15;
+                data.speedKmh = 14;
+                state.avoidanceState = 'clear';
+                state.blockedByVehicleId = null;
+                data.status = 'Acesso ao Pátio';
+                data.loc = 'Portaria · Acesso ao Corredor de Entrada (Limite 15 km/h)';
 
-                if (detourPlan.canDetour && detourPlan.chosenWaypoint) {
-                  // DESVIO DE ROTA ATIVADO COM SUCESSO!
-                  state.detourActive = true;
-                  state.detourTarget = detourPlan.chosenWaypoint;
-                  state.detourDirection = detourPlan.direction;
-                  state.detourTimer = 4.5;
-                  state.avoidanceState = 'detouring';
-                  state.blockedByVehicleId = col.obstacleId;
-
-                  data.speedKmh = 22;
-                  data.status = 'Desvio de Rota';
-                  data.loc = `Pátio Central · Desvio Lateral Anticolisão (${detourPlan.direction === 'right' ? 'Direita' : 'Esquerda'} de ${col.obstacleId})`;
-                  data.routineStepDesc = `Manobra evasiva ativa: desvio à ${detourPlan.direction === 'right' ? 'direita' : 'esquerda'} para contornar ${col.obstacleId}`;
-                  data.routineParameters = 'Radar LiDAR 360° | Desvio de Rota em Execução | 22 km/h';
-
-                  activityLogCallbackRef.current?.(
-                    'Anticolisão · Desvio de Rota',
-                    `${data.id}: Rota desviada à ${detourPlan.direction === 'right' ? 'direita' : 'esquerda'} para contornar ${col.obstacleId}.`,
-                    'truck',
-                    'warning'
-                  );
-                  return;
+                if (mesh.position.z <= targetZ + 0.08) {
+                  mesh.position.z = targetZ;
+                  state.approachPhase = 'YARD_CORRIDOR';
                 }
-
-                // Se desvio lateral não for seguro (espaço estreito): LÓGICA DE ESPERA
+              } else {
                 data.speedKmh = 0;
                 state.avoidanceState = 'waiting';
                 state.blockedByVehicleId = col.obstacleId;
-                data.status = 'Aguardando Passagem';
-                data.loc = `Pátio Central · Parada de Segurança (Cedendo passagem a ${col.obstacleId})`;
-                data.routineStepDesc = `Parada preventiva anticolisão: aguardando liberação por ${col.obstacleId}`;
-                data.routineParameters = 'Freio de Segurança Ativo | Distância Monitorada | Radar Ativo';
+                data.status = 'Aguardando Desobstrução';
+                data.loc = `Portaria · Aguardando liberação por ${col.obstacleId}`;
+              }
+              return;
+            }
+
+            // FASE 2: Trânsito Longitudinal no Corredor (z = 17.5) até a Coluna da Doca (x = state.dockX)
+            if (state.approachPhase === 'YARD_CORRIDOR') {
+              const targetX = state.dockX;
+              const xDiff = targetX - mesh.position.x;
+              const isMovingEast = xDiff > 0;
+              const targetAngle = isMovingEast ? Math.PI / 2 : -Math.PI / 2;
+
+              let diff = targetAngle - mesh.rotation.y;
+              while (diff < -Math.PI) diff += Math.PI * 2;
+              while (diff > Math.PI) diff -= Math.PI * 2;
+              mesh.rotation.y += THREE.MathUtils.clamp(diff, -0.065 * currentSimSpeed, 0.065 * currentSimSpeed);
+
+              mesh.position.z += (17.5 - mesh.position.z) * 0.15; // Mantém na Faixa de Entrada Norte
+
+              // Checar se há veículo em saída/desocupação na trajetória deste quadrante
+              let pathBlockedByDeparture = false;
+              let blockerName: string | null = null;
+              truckMeshesRef.current.forEach((other) => {
+                if (
+                  other.data.id !== data.id &&
+                  other.mesh.visible &&
+                  (other.state.stage === 'DEPARTING' ||
+                    (other.state.stage === 'EXITING_CD' && other.mesh.position.z < 21.0))
+                ) {
+                  // Se o outro veículo estiver saindo da mesma doca ou num raio de 8m à frente
+                  if (
+                    other.state.dockId === state.dockId ||
+                    Math.abs(other.mesh.position.x - mesh.position.x) < 7.5
+                  ) {
+                    pathBlockedByDeparture = true;
+                    blockerName = other.data.id;
+                  }
+                }
+              });
+
+              if (pathBlockedByDeparture) {
+                data.speedKmh = 0;
+                state.avoidanceState = 'waiting';
+                state.blockedByVehicleId = blockerName;
+                data.status = 'Cedendo Passagem (CTB Art. 29)';
+                data.loc = `Corredor Central · Parada preventiva cedendo passagem para saída de ${blockerName}`;
                 return;
               }
 
-              // Rota desobstruída: avançar normalmente
-              state.avoidanceState = 'clear';
-              state.blockedByVehicleId = null;
-              mesh.rotation.y = nextRotY;
-              mesh.position.x = nextX;
-              mesh.position.z = nextZ;
-              data.speedKmh = 32;
-              data.status = 'Aproximação Pátio';
-              data.loc = `Pátio Central · Rumo à Doca 0${state.dockId}`;
-            } else {
-              state.detourActive = false;
-              state.avoidanceState = 'clear';
-              state.stage = 'ALIGN_REVERSE';
-              data.status = 'A acoplar (Ré)';
-              data.loc = `Em frente à Doca 0${state.dockId} (Alinhamento de Ré)`;
-              if (statusCallbackRef.current) {
-                statusCallbackRef.current(data.id, 'A acoplar (Ré)', 5, data.loc, 4, 'Momento 4 · Alinhamento & Ré', 'Aviso Sonoro Ativo | Alinhamento 0°');
+              if (Math.abs(xDiff) > 0.4) {
+                const step = Math.min(Math.abs(xDiff), 0.145 * currentSimSpeed);
+                const nextX = isMovingEast ? mesh.position.x + step : mesh.position.x - step;
+                const col = checkTruckCollision(data.id, nextX, 17.5, mesh.rotation.y, 0.40);
+
+                if (!col.collides) {
+                  mesh.position.x = nextX;
+                  data.speedKmh = 14;
+                  state.avoidanceState = 'clear';
+                  state.blockedByVehicleId = null;
+                  data.status = 'Trânsito no Pátio';
+                  data.loc = `Corredor de Entrada · Rumo à Doca 0${state.dockId} (Vel. ≤ 15 km/h)`;
+                } else {
+                  data.speedKmh = 0;
+                  state.avoidanceState = 'waiting';
+                  state.blockedByVehicleId = col.obstacleId;
+                  data.status = 'Aguardando Passagem';
+                  data.loc = `Corredor Central · Parada de Segurança (Aguardando ${col.obstacleId})`;
+                }
+              } else {
+                mesh.position.x = targetX;
+                state.approachPhase = 'DOCK_APRON';
+              }
+              return;
+            }
+
+            // FASE 3: Entrada no Apron da Doca (x = state.dockX, avanço para z = 13.5 e alinhamento frontal a 0°)
+            if (state.approachPhase === 'DOCK_APRON') {
+              // VERIFICAÇÃO CRUCIAL DE DESOCUPAÇÃO: A doca designada está livre de caminhões atracados ou partindo?
+              let dockApronBusy = false;
+              let busyTruckId: string | null = null;
+              truckMeshesRef.current.forEach((other) => {
+                if (
+                  other.data.id !== data.id &&
+                  other.mesh.visible &&
+                  other.state.stage !== 'STANDBY_HIGHWAY' &&
+                  other.state.stage !== 'MISSION_COMPLETED'
+                ) {
+                  if (
+                    other.state.dockId === state.dockId &&
+                    !(other.state.stage === 'EXITING_CD' && other.mesh.position.z >= 22.0)
+                  ) {
+                    dockApronBusy = true;
+                    busyTruckId = other.data.id;
+                  }
+                  if (
+                    Math.abs(other.mesh.position.x - state.dockX) < 4.5 &&
+                    other.mesh.position.z < 15.5
+                  ) {
+                    dockApronBusy = true;
+                    busyTruckId = other.data.id;
+                  }
+                }
+              });
+
+              if (dockApronBusy) {
+                // Parar com segurança na Faixa de Entrada (z = 17.5) cedendo passagem livre para a saída do outro veículo
+                data.speedKmh = 0;
+                state.avoidanceState = 'waiting';
+                state.blockedByVehicleId = busyTruckId;
+                data.status = 'Aguardando Doca Livre';
+                data.loc = `Pátio Central · Aguardando liberação da Doca 0${state.dockId} por ${busyTruckId || 'outro veículo'} (CTB Art. 29)`;
+                data.routineStepDesc = `Aguardando saída e liberação da Doca 0${state.dockId}`;
+                return;
+              }
+
+              // Doca 100% desobstruída: alinhar para a doca (rotY = 0) e avançar até z = 13.5
+              const targetAngle = 0;
+              let diff = targetAngle - mesh.rotation.y;
+              while (diff < -Math.PI) diff += Math.PI * 2;
+              while (diff > Math.PI) diff -= Math.PI * 2;
+              mesh.rotation.y += THREE.MathUtils.clamp(diff, -0.065 * currentSimSpeed, 0.065 * currentSimSpeed);
+
+              mesh.position.x += (state.dockX - mesh.position.x) * 0.2;
+
+              const targetZ = 13.5;
+              if (mesh.position.z > targetZ + 0.1) {
+                const forwardSpeed = 0.115 * currentSimSpeed;
+                const nextZ = mesh.position.z - forwardSpeed;
+                const col = checkTruckCollision(data.id, state.dockX, nextZ, mesh.rotation.y, 0.85);
+
+                if (!col.collides) {
+                  mesh.position.z = nextZ;
+                  data.speedKmh = 8;
+                  state.avoidanceState = 'clear';
+                  state.blockedByVehicleId = null;
+                  data.status = 'Posicionamento Apron';
+                  data.loc = `Apron da Doca 0${state.dockId} · Preparação de Ré`;
+                } else {
+                  data.speedKmh = 0;
+                  state.avoidanceState = 'waiting';
+                  state.blockedByVehicleId = col.obstacleId;
+                  data.status = 'Aguardando Desobstrução';
+                  data.loc = `Em frente à Doca 0${state.dockId} · Aguardando liberação por ${col.obstacleId}`;
+                }
+              } else {
+                mesh.position.z = targetZ;
+                mesh.position.x = state.dockX;
+                state.avoidanceState = 'clear';
+                state.stage = 'ALIGN_REVERSE';
+                data.status = 'A acoplar (Ré)';
+                data.loc = `Em frente à Doca 0${state.dockId} (Alinhamento de Ré)`;
+                if (statusCallbackRef.current) {
+                  statusCallbackRef.current(data.id, 'A acoplar (Ré)', 5, data.loc, 4, 'Momento 4 · Alinhamento & Ré', 'Aviso Sonoro Ativo | Alinhamento 0°');
+                }
               }
             }
           }
 
-          // MOMENTO 3b · Espera no Pátio (Área de Staging individual em frente à doca)
+          // MOMENTO 3b · Espera no Pátio (Holding Bay Seguro)
           else if (state.stage === 'WAITING_YARD') {
             data.routineStep = 3;
             data.routineStepName = 'Momento 3b · Espera no Pátio';
             data.routineStepDesc = `Aguardando desocupação da Doca 0${state.dockId}`;
             data.routineParameters = 'Holding Bay Ativo | Motor em Ponto Morto | Sensor Ativo';
-
-            // Posição de espera individual em frente à doca correspondente (evita sobreposição)
-            const holdX = state.dockX;
-            const holdZ = 17.5;
-            const dx = holdX - mesh.position.x;
-            const dz = holdZ - mesh.position.z;
-            const dist = Math.sqrt(dx * dx + dz * dz);
-
-            if (dist > 0.4) {
-              const step = Math.min(dist, 0.115 * currentSimSpeed);
-              const nextX = mesh.position.x + (dx / dist) * step;
-              const nextZ = mesh.position.z + (dz / dist) * step;
-              const col = checkTruckCollision(data.id, nextX, nextZ, mesh.rotation.y, 0.85);
-              if (!col.collides) {
-                mesh.position.x = nextX;
-                mesh.position.z = nextZ;
-                data.speedKmh = 22;
-                state.avoidanceState = 'clear';
-                state.blockedByVehicleId = null;
-              } else {
-                data.speedKmh = 0;
-                state.avoidanceState = 'waiting';
-                state.blockedByVehicleId = col.obstacleId;
-              }
-            } else {
-              data.speedKmh = 0;
-              state.avoidanceState = 'waiting';
-            }
+            data.speedKmh = 0;
+            state.avoidanceState = 'waiting';
             data.status = 'Aguardando Doca';
             data.loc = `Pátio de Espera (Aguardando liberação da Doca 0${state.dockId})`;
 
@@ -1032,19 +1099,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                 other.state.dockId === state.dockId &&
                 other.state.stage !== 'STANDBY_HIGHWAY' &&
                 other.state.stage !== 'MISSION_COMPLETED' &&
-                !(other.state.stage === 'EXITING_CD' && other.mesh.position.z >= 22.0)
-              ) {
-                stillOccupied = true;
-              }
-              // Se outro caminhão estiver ativamente partindo ou manobrando em frente a esta doca
-              if (
-                other.data.id !== data.id &&
-                other.mesh.visible &&
-                (other.state.stage === 'DEPARTING' ||
-                  other.state.stage === 'ALIGN_REVERSE' ||
-                  other.state.stage === 'REVERSING') &&
-                Math.abs(other.mesh.position.x - state.dockX) < 7.5 &&
-                other.mesh.position.z < 16.5
+                !(other.state.stage === 'EXITING_CD' && other.mesh.position.z >= 24.0)
               ) {
                 stillOccupied = true;
               }
@@ -1052,6 +1107,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
 
             if (!stillOccupied) {
               state.stage = 'APPROACH';
+              state.approachPhase = 'YARD_CORRIDOR';
             }
           }
 
@@ -1060,7 +1116,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
             data.routineStep = 4;
             data.routineStepName = 'Momento 4 · Alinhamento & Ré';
             data.routineStepDesc = 'Alinhamento angular 0° e preparação para engate de ré';
-            data.routineParameters = 'Sinal Sonoro Ativo | Velocidade Ré: 14 km/h | Alinhamento 0°';
+            data.routineParameters = 'Sinal Sonoro Ativo | Velocidade Ré: 5 km/h | Alinhamento 0°';
 
             const desiredRotY = 0;
             let diff = desiredRotY - mesh.rotation.y;
@@ -1084,7 +1140,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
             data.routineStep = 4;
             data.routineStepName = 'Momento 4 · Manobra de Ré';
             data.routineStepDesc = `Recuo guiado até o batente da Doca 0${state.dockId}`;
-            data.routineParameters = 'Sinal Sonoro Intermitente | Velocidade: 14 km/h | Batente de Borracha';
+            data.routineParameters = 'Alarme Sonoro NR-11 Intermitente | Velocidade: 5 km/h | Sinaleiro com Bastão';
 
             const targetZ = state.targetZ;
 
@@ -1109,8 +1165,8 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
               mesh.position.z = nextZ;
               mesh.position.x = nextX;
               data.status = 'A acoplar (Ré)';
-              data.loc = `Doca 0${state.dockId} (Manobra de Ré com Sinal Sonoro)`;
-              data.speedKmh = 14;
+              data.loc = `Doca 0${state.dockId} (Manobra de Ré com Alarme NR-11 e Sinaleiro)`;
+              data.speedKmh = 5;
 
               state.beepTimer += 0.040 * currentSimSpeed;
               if (state.beepTimer > 1.0) {
@@ -1127,12 +1183,12 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
               state.progressPercent = 0;
 
               data.status = 'Acoplado · Vistoria';
-              data.loc = `Doca 0${state.dockId} (Calçamento & NFe)`;
+              data.loc = `Doca 0${state.dockId} (Calçamento & Chave no Lacre)`;
               data.speedKmh = 0;
               data.routineStep = 5;
               data.routineStepName = 'Momento 5 · Acoplamento & Vistoria';
-              data.routineStepDesc = 'Travamento de calços de roda e abertura de portas';
-              data.routineParameters = 'Calços Engatados | Vedação Inflada | NFe Validada';
+              data.routineStepDesc = 'Calçamento físico de rodas (NR-11) e retenção de chaves no lacre (CTB Art. 2º)';
+              data.routineParameters = 'Calços Travados | Chave Retida na Portaria | Vedação Inflada | NFe Validada';
 
               soundManager.playDockSuccess();
 
@@ -1318,24 +1374,24 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
             data.routineStep = 9;
             data.routineStepName = 'Momento 9 · Partida da Doca';
             data.routineStepDesc = 'Avanço frontal da doca para a pista de rolamento do pátio';
-            data.routineParameters = 'Desengate Concluído | Avanço Frontal | Velocidade: 25 km/h';
+            data.routineParameters = 'Desengate Concluído | Avanço Frontal | Velocidade: 14 km/h';
 
-            const forwardYardZ = 14.8;
+            const forwardYardZ = 13.5;
             if (mesh.position.z < forwardYardZ) {
               const forwardSpeed = 0.135 * currentSimSpeed;
               const nextZ = mesh.position.z + forwardSpeed;
-              const col = checkTruckCollision(data.id, mesh.position.x, nextZ, mesh.rotation.y, 0.85);
+              const col = checkTruckCollision(data.id, mesh.position.x, nextZ, mesh.rotation.y, 0.40);
               if (!col.collides) {
                 mesh.position.z = nextZ;
-                data.speedKmh = 25;
+                data.speedKmh = 12;
                 state.avoidanceState = 'clear';
                 state.blockedByVehicleId = null;
               } else {
                 // PRIORIDADE DE DESOCUPAÇÃO: Se o obstáculo for caminhão aproximante ou em espera, o aproximante deve recuar
                 const obstTruck = col.obstacleId ? truckMeshesRef.current.get(col.obstacleId) : null;
                 if (obstTruck && (obstTruck.state.stage === 'APPROACH' || obstTruck.state.stage === 'WAITING_YARD')) {
-                  obstTruck.mesh.position.z = Math.max(obstTruck.mesh.position.z, 17.5);
-                  obstTruck.data.status = 'Cedendo Passagem';
+                  obstTruck.mesh.position.z = Math.max(obstTruck.mesh.position.z, 18.5);
+                  obstTruck.data.status = 'Cedendo Passagem (CTB Art. 29)';
                   obstTruck.data.loc = `Pátio Central · Cedendo via para saída de ${data.id}`;
                   obstTruck.state.avoidanceState = 'waiting';
                 }
@@ -1397,12 +1453,12 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                 const nextZ = mesh.position.z + Math.cos(nextRotY) * forwardSpeed;
                 const nextX = mesh.position.x + Math.sin(nextRotY) * forwardSpeed;
 
-                const col = checkTruckCollision(data.id, nextX, nextZ, nextRotY, 0.85);
+                const col = checkTruckCollision(data.id, nextX, nextZ, nextRotY, 0.40);
                 if (!col.collides) {
                   mesh.rotation.y = nextRotY;
                   mesh.position.z = nextZ;
                   mesh.position.x = nextX;
-                  data.speedKmh = 30;
+                  data.speedKmh = 14;
                   state.avoidanceState = 'clear';
                 } else {
                   data.speedKmh = 0;
@@ -1509,12 +1565,12 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                 const nextZ = mesh.position.z + Math.cos(nextRotY) * forwardSpeed;
                 const nextX = mesh.position.x + Math.sin(nextRotY) * forwardSpeed;
 
-                const col = checkTruckCollision(data.id, nextX, nextZ, nextRotY, 0.85);
+                const col = checkTruckCollision(data.id, nextX, nextZ, nextRotY, 0.40);
                 if (!col.collides) {
                   mesh.rotation.y = nextRotY;
                   mesh.position.z = nextZ;
                   mesh.position.x = nextX;
-                  data.speedKmh = 30;
+                  data.speedKmh = 14;
                   state.avoidanceState = 'clear';
                 } else {
                   data.speedKmh = 0;
@@ -1686,8 +1742,10 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                 mesh.position.x += (dx / dist) * Math.min(dist, speed);
                 mesh.position.z += (dz / dist) * Math.min(dist, speed);
                 data.status = 'A transportar';
-                data.loc = `A caminho da Doca 0${targetTruck.state.dockId} (Coleta)`;
-                data.speedKmh = 18;
+                data.loc = Math.abs(mesh.position.z - (-5.5)) < 0.8
+                  ? 'Cruzamento Cego Central (Parada & Buzina NR-11)'
+                  : `A caminho da Doca 0${targetTruck.state.dockId} (Coleta)`;
+                data.speedKmh = 7;
                 if (palletMesh) palletMesh.visible = false;
               } else {
                 state.stage = 'LIFTING';
@@ -1718,8 +1776,10 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
                 mesh.position.x += (dx / dist) * Math.min(dist, speed);
                 mesh.position.z += (dz / dist) * Math.min(dist, speed);
                 data.status = 'A transportar';
-                data.loc = `Transportando Palete para ${state.rackX < 0 ? 'Corredor A' : 'Corredor B'}`;
-                data.speedKmh = 18;
+                data.loc = Math.abs(mesh.position.z - (-5.5)) < 0.8
+                  ? 'Cruzamento Cego Central (Parada & Buzina NR-11)'
+                  : `Transportando Palete para ${state.rackX < 0 ? 'Corredor A' : 'Corredor B'}`;
+                data.speedKmh = 7;
                 if (palletMesh) palletMesh.visible = true;
               } else {
                 state.stage = 'STORING';
@@ -1754,7 +1814,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
               mesh.position.z += (dz / dist) * Math.min(dist, speed * 0.90);
               data.status = 'Em trânsito';
               data.loc = 'Retornando à Vaga de Estacionamento Interior';
-              data.speedKmh = 14;
+              data.speedKmh = 6;
             } else {
               state.stage = 'PARKED';
               data.status = 'Estacionado';
@@ -1807,7 +1867,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
             const step = Math.min(dist, agvSpeed);
             mesh.position.x += (dx / dist) * step;
             mesh.position.z += (dz / dist) * step;
-            data.speedKmh = 20;
+            data.speedKmh = 5;
             data.status = 'A transportar';
             data.loc = `${state.loopName} (Waypoint ${state.currentWpIdx + 1})`;
 
@@ -1828,7 +1888,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
         truckMeshesRef.current.forEach((t) => {
           if (
             t.mesh.visible &&
-            ['DOCKED_INSPECTION', 'DOCKED_OPERATING', 'DOCKED_RANDOM_EVENT', 'DOCKED_FINISHED'].includes(t.state.stage)
+            ['DOCKED_INSPECTION', 'DOCKED_OPERATING', 'DOCKED_RANDOM_EVENT', 'DOCKED_COMPLETED', 'DOCKED_FINISHED'].includes(t.state.stage)
           ) {
             physicallyDockedBays.add(t.state.dockId);
           }
@@ -2028,7 +2088,7 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
         initX: 5.5,
         rotY: 0,
         exitDirection: 'right',
-        progress: 85,
+        progress: 45,
         totalPallets: 20,
         standby: 0,
         gateSide: 'east',
@@ -2049,16 +2109,16 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
       },
       {
         id: 'TRK-9150',
-        dockId: 1,
-        initialStage: 'GATE_IN',
+        dockId: 4,
+        initialStage: 'STANDBY_HIGHWAY',
         op: 'UNLOAD',
         initZ: 19.0,
-        initX: -42.0,
+        initX: -52.0,
         rotY: Math.PI / 2,
-        exitDirection: 'left',
+        exitDirection: 'right',
         progress: 0,
         totalPallets: 22,
-        standby: 0,
+        standby: 8.5,
         gateSide: 'west',
       },
     ];
@@ -2318,19 +2378,38 @@ export const WarehouseCanvas: React.FC<WarehouseCanvasProps> = ({
         </div>
       )}
 
-      {/* LiDAR Fields Toggle Overlay */}
-      <div className="absolute bottom-16 sm:bottom-6 left-3 sm:left-6 z-20 flex items-center gap-1.5 sm:gap-2 bg-slate-900/90 backdrop-blur-md px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-800 text-[11px] sm:text-xs font-mono text-slate-300 shadow-lg">
-        <Radio className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-        <label className="flex items-center gap-1.5 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showLidarFields}
-            onChange={(e) => setShowLidarFields(e.target.checked)}
-            className="rounded border-slate-700 text-blue-600 focus:ring-0 cursor-pointer"
-          />
-          <span className="hidden sm:inline">Campos de Segurança LiDAR 3D</span>
-          <span className="sm:hidden">Campos LiDAR</span>
-        </label>
+      {/* LiDAR Fields Toggle Overlay & Regulatory Compliance Trigger */}
+      <div className="absolute bottom-16 sm:bottom-6 left-3 sm:left-6 z-20 flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 bg-slate-900/90 backdrop-blur-md px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-800 text-[11px] sm:text-xs font-mono text-slate-300 shadow-lg">
+          <Radio className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showLidarFields}
+              onChange={(e) => setShowLidarFields(e.target.checked)}
+              className="rounded border-slate-700 text-blue-600 focus:ring-0 cursor-pointer"
+            />
+            <span className="hidden sm:inline">Campos de Segurança LiDAR 3D</span>
+            <span className="sm:hidden">Campos LiDAR</span>
+          </label>
+        </div>
+
+        {onOpenRegulatory && (
+          <button
+            onClick={() => {
+              soundManager.playClick();
+              onOpenRegulatory();
+            }}
+            className="flex items-center gap-1.5 sm:gap-2 bg-emerald-950/80 hover:bg-emerald-900/80 backdrop-blur-md px-2.5 sm:px-3 py-1.5 rounded-xl border border-emerald-500/40 text-[11px] sm:text-xs font-mono text-emerald-300 shadow-lg transition-all cursor-pointer group"
+            title="Abrir Central de Conformidade Regulatória (CTB e NRs)"
+          >
+            <Scale className="w-3.5 h-3.5 text-emerald-400 shrink-0 group-hover:scale-110 transition-transform" />
+            <span className="font-semibold">Regras CTB & NRs</span>
+            <span className="hidden md:inline px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-200 text-[10px] font-bold border border-emerald-500/30">
+              100% Conforme
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );
